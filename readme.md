@@ -27,7 +27,7 @@ The OMR sheet layout is defined in `omr_config.json`. Modify this file to match 
 2. **Run the script**
 
    ```sh
-   python omr_analyzer.py
+   python main.py
    ```
 
 3. **Check the results**
