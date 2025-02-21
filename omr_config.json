@@ -1,0 +1,19 @@
+{
+    "columns": [
+      {
+        "col_width": 0.224,
+        "gap_after": 0.167
+      },
+      {
+        "col_width": 0.2165,
+        "gap_after": 0.16
+      },
+      {
+        "col_width": 0.224,
+        "gap_after": 0
+      }
+    ],
+    "questions_per_column": 10, 
+    "num_options": 4
+  }
+  
