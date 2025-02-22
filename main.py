@@ -1,128 +1,118 @@
 import cv2
 import numpy as np
-import json
-import csv
 
-def load_config(config_path="omr_config.json"):
-    """Loads OMR layout configuration from a JSON file."""
-    with open(config_path, "r") as file:
-        return json.load(file)
-
-def load_and_preprocess_image(image_path):
-    """Loads, converts to grayscale, applies blur, and thresholds the image."""
+def preprocess_image(image_path, grayscale_output="grayscale_omr.png", binary_output="binary_omr.png"):
+    """Loads an image, converts it to grayscale, applies Gaussian blur, and applies a fixed threshold."""
     img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    
     if img is None:
-        raise ValueError(f"Error: Could not load image: {image_path}")
-    
-    img = cv2.GaussianBlur(img, (5, 5), 0)
-    _, img_thresh = cv2.threshold(img, 50, 255, cv2.THRESH_BINARY_INV)
-    return img_thresh
+        raise ValueError(f"Error: Could not load image from path: {image_path}")
 
-def find_contours(img_thresh):
-    """Finds contours in the thresholded image."""
-    contours, _ = cv2.findContours(img_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    return contours
+    # Save grayscale image
+    cv2.imwrite(grayscale_output, img)
 
-def get_column_boundaries(image_width, columns):
-    """Calculates column boundaries dynamically based on JSON configuration."""
-    boundaries = []
-    start_x = 0
-    
-    for col in columns:
-        col_width = col["col_width"] * image_width
-        boundaries.append((start_x, start_x + col_width))
-        start_x += col_width + (col["gap_after"] * image_width)
-    
-    return boundaries
+    # Apply Gaussian blur to reduce noise
+    blurred_img = cv2.GaussianBlur(img, (5, 5), 0)
 
-def determine_column(cX, col_boundaries):
-    """Determines which column a given x-coordinate belongs to."""
-    for col_idx, (start, end) in enumerate(col_boundaries):
-        if start <= cX < end:
-            return col_idx
-    return None
+    # Apply fixed inverse binary thresholding
+    _, binary_img = cv2.threshold(blurred_img, 50, 255, cv2.THRESH_BINARY_INV)
 
-def analyze_omr(image_path, config_path="omr_config.json", top_spacing_percentage=0.0, min_contour_area=200, max_multiple_marks=1):
-    """Analyzes the OMR sheet using dynamic configurations and handles multi-marked answers."""
-    try:
-        config = load_config(config_path)  # Load the OMR layout config
-        img_thresh = load_and_preprocess_image(image_path)
-        contours = find_contours(img_thresh)
+    # Save the binary thresholded image
+    cv2.imwrite(binary_output, binary_img)
 
-        selected_answers = {}
-        options = ['A', 'B', 'C', 'D'][:config["num_options"]]  # Adjust number of options dynamically
+    return binary_img
 
-        image_height, image_width = img_thresh.shape
-        questions_per_column = config["questions_per_column"]
-        row_height = (image_height * (1 - top_spacing_percentage)) / questions_per_column
+def detect_filled_bubbles(img_thresh, sections, img_shape):
+    """Detects filled bubbles based on predefined sections and unique fill ratio per section."""
+    height, width = img_shape
+    filled_bubbles = {}
 
-        col_boundaries = get_column_boundaries(image_width, config["columns"])
+    for section_name, x1_perc, x2_perc, y1_perc, y2_perc, options, num_questions, min_fill_ratio in sections:
+        x1, x2 = int(x1_perc / 100 * width), int(x2_perc / 100 * width)
+        y1, y2 = int(y1_perc / 100 * height), int(y2_perc / 100 * height)
 
-        # Dictionary to track the number of marked bubbles per question
-        question_bubbles = {i: [] for i in range(1, (len(config["columns"]) * questions_per_column) + 1)}
+        row_height = (y2 - y1) / num_questions
+        col_width = (x2 - x1) / len(options)
 
-        for contour in contours:
-            if cv2.contourArea(contour) < min_contour_area:
-                continue
+        for q in range(num_questions):
+            for o, option in enumerate(options):
+                cx1, cx2 = int(x1 + o * col_width), int(x1 + (o + 1) * col_width)
+                cy1, cy2 = int(y1 + q * row_height), int(y1 + (q + 1) * row_height)
 
-            M = cv2.moments(contour)
-            if M["m00"] == 0:
-                continue
+                cell = img_thresh[cy1:cy2, cx1:cx2]
+                total_pixels = cell.size
+                black_pixels = np.sum(cell == 255)  # Count filled (white) pixels in the inverted image
+                fill_ratio = black_pixels / total_pixels
 
-            cX = int(M["m10"] / M["m00"])
-            cY = int(M["m01"] / M["m00"])
+                if fill_ratio > min_fill_ratio:
+                    filled_bubbles.setdefault(section_name, []).append((q + 1, option))
 
-            row = int((cY - (image_height * top_spacing_percentage)) / row_height) + 1
-            if row < 1 or row > questions_per_column:
-                continue
+    return filled_bubbles
 
-            col_idx = determine_column(cX, col_boundaries)
-            if col_idx is None:
-                continue
+def draw_detected_areas(image, filled_bubbles, sections, img_shape):
+    """Draws bounding boxes around detected filled bubbles and overlays grid lines."""
+    height, width = img_shape
 
-            question_num = col_idx * questions_per_column + row
-            col_start, col_end = col_boundaries[col_idx]
-            col_width = col_end - col_start
-            segment_width = col_width / (config["num_options"] + 1)
-            relative_x = cX - col_start
-            option_index = int(relative_x / segment_width) - 1
+    for section_name, x1_perc, x2_perc, y1_perc, y2_perc, options, num_questions, _ in sections:
+        x1, x2 = int(x1_perc / 100 * width), int(x2_perc / 100 * width)
+        y1, y2 = int(y1_perc / 100 * height), int(y2_perc / 100 * height)
 
-            # Add the contour to the relevant question
-            if 0 <= option_index < len(options):
-                question_bubbles[question_num].append(option_index)
+        row_height = (y2 - y1) / num_questions
+        col_width = (x2 - x1) / len(options)
 
-        # Now process multi-marked answers
-        for question_num, bubbles in question_bubbles.items():
-            if len(bubbles) > max_multiple_marks:  # Flag or handle multi-marked answers
-                selected_answers[question_num] = "Multiple Marks"
-            elif len(bubbles) == 1:
-                selected_answers[question_num] = options[bubbles[0]]
-            else:
-                selected_answers[question_num] = "Not Marked"
+        for q in range(num_questions):
+            for o, option in enumerate(options):
+                cx1, cx2 = int(x1 + o * col_width), int(x1 + (o + 1) * col_width)
+                cy1, cy2 = int(y1 + q * row_height), int(y1 + (q + 1) * row_height)
 
-        return selected_answers
+                cv2.rectangle(image, (cx1, cy1), (cx2, cy2), (255, 0, 0), 1)  # Draw grid
 
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        return None
+                if (q + 1, option) in filled_bubbles.get(section_name, []):
+                    cv2.rectangle(image, (cx1, cy1), (cx2, cy2), (0, 255, 0), 2)  # Highlight filled bubble
 
-def save_results_to_csv(results, filename="omr_results.csv"):
-    """Saves extracted OMR answers to a CSV file."""
-    with open(filename, mode="w", newline="") as file:
-        writer = csv.writer(file)
-        writer.writerow(["Question", "Selected Answer"])
-        for q_num in sorted(results.keys()):
-            writer.writerow([q_num, results[q_num]])
+    return image
+
+def scan_omr(image_path, output_path="scanned_omr.png", show=False):
+    """Processes an OMR sheet, detects filled bubbles, and saves the scanned result."""
+    sections = [
+        ("MCQ Section 1", 8, 24, 19, 90.5, ["A", "B", "C", "D"], 25, 0.05),
+        ("MCQ Section 2", 31, 46.5, 19, 90.5, ["A", "B", "C", "D"], 25, 0.05),
+        ("Roll Number", 49, 61.5, 24, 38.5, list(range(1, 7)), 10, 0.3),
+        ("Registration", 49, 61.5, 45.5, 60.2, list(range(1, 7)), 10, 0.3),
+        ("Subject Code", 67.5, 74, 45.5, 60.2, list(range(1, 4)), 10, 0.25),
+        ("Set Code", 67.5, 74, 24, 34, ["Set"], 4, 0.01),
+    ]
+
+    # Load the original image
+    original_img = cv2.imread(image_path)
+    if original_img is None:
+        raise ValueError(f"Error: Unable to read image at path {image_path}")
+
+    # Preprocess the image
+    img_thresh = preprocess_image(image_path)
+
+    # Detect filled bubbles with section-specific fill ratios
+    filled_bubbles = detect_filled_bubbles(img_thresh, sections, img_thresh.shape)
+
+    # Draw results
+    result_img = draw_detected_areas(original_img, filled_bubbles, sections, img_thresh.shape)
+
+    # Save the processed image
+    cv2.imwrite(output_path, result_img)
+    print(f"Scanned OMR saved as {output_path}")
+
+    if show:
+        cv2.imshow("Scanned OMR", result_img)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+    return filled_bubbles
 
 if __name__ == "__main__":
-    image_path = "image.png"  # Replace with your OMR image
-    selected_answers = analyze_omr(image_path)
-
-    if selected_answers:
-        print("Selected Answers:")
-        for q_num in sorted(selected_answers.keys()):
-            print(f"Q{q_num}: {selected_answers[q_num]}")
-        
-        save_results_to_csv(selected_answers)
-    else:
-        print("Could not analyze OMR sheet.")
+    try:
+        results = scan_omr("omr.jpg", "scanned_omr.png", show=False)
+        print("OMR Results:")
+        for section, answers in results.items():
+            print(f"{section}: {answers}")
+    except Exception as e:
+        print(f"Error: {e}")
