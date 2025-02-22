@@ -119,32 +119,70 @@ def process_missing_section(filled_bubbles, section_name, expected_columns):
             result.append((None, 'X'))
     # Sorting by the column (expected_columns order is already sorted)
     return result
+def process_missing_section(results, section_name, expected_columns):
+    """Process each section to handle missing values by replacing them with 'X'."""
+    processed_data = []
+    section_data = results.get(section_name, [])
+    
+    for question, column in section_data:
+        if isinstance(column, str):
+            # If column is a string (e.g., 'Set'), ensure we don't attempt to operate on it
+            continue
+        processed_data.append((question, int(column)))  # Ensure column is an integer
+
+    return processed_data
+
+def format_section_output(section_name, processed_data, expected_values):
+    """Format the section output as a string, filling missing values with 'X'."""
+    output = ['X'] * len(expected_values)  # Initialize all as 'X'
+
+    for question, column in processed_data:
+        column_index = int(column) - 1  # Ensure column is an integer and adjust to 0-based index
+        if column_index < len(output):
+            output[column_index] = str(question)
+
+    return ''.join(output)
+def subtract_one_from_digits(input_string):
+    """Subtract 1 from each digit in the string, leave 'X' unchanged."""
+    result = []
+    for char in input_string:
+        if char.isdigit():  # If it's a digit, subtract 1
+            result.append(str(int(char) - 1))
+        else:
+            result.append(char)  # If it's 'X', keep it unchanged
+    return ''.join(result)
 
 if __name__ == "__main__":
     try:
         results = scan_omr("omr.jpg", "scanned_omr.png", show=False)
 
         # For Roll Number, Registration, and Subject Code, sort by the column (second element)
-        # Expected columns:
-        expected_roll = list(range(1, 7))
-        expected_reg  = list(range(1, 7))
-        expected_subj = list(range(1, 4))
+        expected_roll = list(range(1, 7))  # 6 columns for Roll Number
+        expected_reg  = list(range(1, 7))  # 6 columns for Registration
+        expected_subj = list(range(1, 4))  # 3 columns for Subject Code
 
+        # Process missing values in each section
         processed_roll = process_missing_section(results, "Roll Number", expected_roll)
         processed_reg  = process_missing_section(results, "Registration", expected_reg)
         processed_subj = process_missing_section(results, "Subject Code", expected_subj)
 
-        print("OMR Results:")
-        # Print MCQ sections as detected (unchanged order)
+        # Format and print Roll Number, Registration, and Subject Code as strings
+        roll_str = format_section_output('Roll Number', processed_roll, expected_roll)
+        reg_str = format_section_output('Registration', processed_reg, expected_reg)
+        subj_str = format_section_output('Subject Code', processed_subj, expected_subj)
+
+        # Apply the subtraction for each result string
+        roll_str_adjusted = subtract_one_from_digits(roll_str)
+        reg_str_adjusted = subtract_one_from_digits(reg_str)
+        subj_str_adjusted = subtract_one_from_digits(subj_str)
+    # Print MCQ sections as detected (unchanged order)
         for section in ["MCQ Section 1", "MCQ Section 2", "Set Code"]:
             print(f"{section}: {results.get(section, [])}")
 
-        print("\nRoll Number (sorted by column and with missing replaced by X):")
-        print(processed_roll)
-        print("\nRegistration (sorted by column and with missing replaced by X):")
-        print(processed_reg)
-        print("\nSubject Code (sorted by column and with missing replaced by X):")
-        print(processed_subj)
+        print(f"Roll Number: {roll_str_adjusted}")
+        print(f"Registration: {reg_str_adjusted}")
+        print(f"Subject Code: {subj_str_adjusted}")
 
     except Exception as e:
         print(f"Error: {e}")
+   

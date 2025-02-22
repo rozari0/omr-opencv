@@ -1,128 +1,184 @@
 import cv2
 import numpy as np
-import json
-import csv
 
-def load_config(config_path="omr_config.json"):
-    """Loads OMR layout configuration from a JSON file."""
-    with open(config_path, "r") as file:
-        return json.load(file)
-
-def load_and_preprocess_image(image_path):
-    """Loads, converts to grayscale, applies blur, and thresholds the image."""
+def preprocess_image(image_path, grayscale_output="grayscale_omr.png", binary_output="binary_omr.png"):
+    """Loads an image, converts it to grayscale, applies Gaussian blur, and applies a fixed threshold."""
     img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
-        raise ValueError(f"Error: Could not load image: {image_path}")
+        raise ValueError(f"Error: Could not load image from path: {image_path}")
+
+    cv2.imwrite(grayscale_output, img)
+    blurred_img = cv2.GaussianBlur(img, (5, 5), 0)
+    _, binary_img = cv2.threshold(blurred_img, 40, 255, cv2.THRESH_BINARY_INV)
+    cv2.imwrite(binary_output, binary_img)
+    return binary_img
+
+def detect_filled_bubbles(img_thresh, sections, img_shape):
+    """
+    Detects filled bubbles based on predefined sections and unique fill ratio per section.
+    For each section, it records tuples of the form (question_number, option).
+    """
+    height, width = img_shape
+    filled_bubbles = {}
+
+    for section_name, x1_perc, x2_perc, y1_perc, y2_perc, options, num_questions, min_fill_ratio in sections:
+        x1 = int(x1_perc / 100 * width)
+        x2 = int(x2_perc / 100 * width)
+        y1 = int(y1_perc / 100 * height)
+        y2 = int(y2_perc / 100 * height)
+        row_height = (y2 - y1) / num_questions
+        col_width = (x2 - x1) / len(options)
+
+        for q in range(num_questions):
+            for o, option in enumerate(options):
+                cx1 = int(x1 + o * col_width)
+                cx2 = int(x1 + (o + 1) * col_width)
+                cy1 = int(y1 + q * row_height)
+                cy2 = int(y1 + (q + 1) * row_height)
+                cell = img_thresh[cy1:cy2, cx1:cx2]
+                total_pixels = cell.size
+                black_pixels = np.sum(cell == 255)
+                fill_ratio = black_pixels / total_pixels
+                if fill_ratio > min_fill_ratio:
+                    filled_bubbles.setdefault(section_name, []).append((q + 1, option))
+    return filled_bubbles
+
+def draw_detected_areas(image, filled_bubbles, sections, img_shape):
+    """Draws bounding boxes around detected filled bubbles and overlays grid lines."""
+    height, width = img_shape
+
+    for section_name, x1_perc, x2_perc, y1_perc, y2_perc, options, num_questions, _ in sections:
+        x1 = int(x1_perc / 100 * width)
+        x2 = int(x2_perc / 100 * width)
+        y1 = int(y1_perc / 100 * height)
+        y2 = int(y2_perc / 100 * height)
+        row_height = (y2 - y1) / num_questions
+        col_width = (x2 - x1) / len(options)
+
+        for q in range(num_questions):
+            for o, option in enumerate(options):
+                cx1 = int(x1 + o * col_width)
+                cx2 = int(x1 + (o + 1) * col_width)
+                cy1 = int(y1 + q * row_height)
+                cy2 = int(y1 + (q + 1) * row_height)
+                cv2.rectangle(image, (cx1, cy1), (cx2, cy2), (255, 0, 0), 1)
+                if (q + 1, option) in filled_bubbles.get(section_name, []):
+                    cv2.rectangle(image, (cx1, cy1), (cx2, cy2), (0, 255, 0), 2)
+    return image
+
+def scan_omr(image_path, output_path="scanned_omr.png", show=False):
+    """Processes an OMR sheet, detects filled bubbles, and saves the scanned result."""
+    sections = [
+        # (Section name, x1%, x2%, y1%, y2%, options, number of questions, min fill ratio)
+        ("MCQ Section 1", 8, 24, 19, 90.5, ["A", "B", "C", "D"], 25, 0.05),
+        ("MCQ Section 2", 31, 46.5, 19, 90.5, ["A", "B", "C", "D"], 25, 0.05),
+        ("Roll Number", 49, 61.5, 24, 38.5, list(range(1, 7)), 10, 0.3),
+        ("Registration", 49, 61.5, 45.5, 60.2, list(range(1, 7)), 10, 0.3),
+        ("Subject Code", 67.5, 74, 45.5, 60.2, list(range(1, 4)), 10, 0.25),
+        ("Set Code", 67.5, 74, 24, 34, ["Set"], 4, 0.01),
+    ]
+
+    original_img = cv2.imread(image_path)
+    if original_img is None:
+        raise ValueError(f"Error: Unable to read image at path {image_path}")
+    img_thresh = preprocess_image(image_path)
+    filled_bubbles = detect_filled_bubbles(img_thresh, sections, img_thresh.shape)
+    result_img = draw_detected_areas(original_img, filled_bubbles, sections, img_thresh.shape)
+    cv2.imwrite(output_path, result_img)
+    print(f"Scanned OMR saved as {output_path}")
+    if show:
+        cv2.imshow("Scanned OMR", result_img)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+    return filled_bubbles
+
+def process_missing_section(filled_bubbles, section_name, expected_columns):
+    """
+    For sections like Roll Number, Registration, and Subject Code,
+    ensure that for each expected column there is one answer.
+    If a column is missing, insert (None, 'X').
+    Then, sort by the column number (second element).
+    """
+    detected = filled_bubbles.get(section_name, [])
+    # Create a dictionary: key = column number, value = tuple (question, column)
+    mapping = {}
+    for tup in detected:
+        question, col = tup
+        # If multiple entries for the same column exist, choose the one with the smallest question number.
+        if col in mapping:
+            if question < mapping[col][0]:
+                mapping[col] = tup
+        else:
+            mapping[col] = tup
+
+    result = []
+    for col in expected_columns:
+        if col in mapping:
+            result.append(mapping[col])
+        else:
+            result.append((None, 'X'))
+    # Sorting by the column (expected_columns order is already sorted)
+    return result
+def process_missing_section(results, section_name, expected_columns):
+    """Process each section to handle missing values by replacing them with 'X'."""
+    processed_data = []
+    section_data = results.get(section_name, [])
     
-    img = cv2.GaussianBlur(img, (5, 5), 0)
-    _, img_thresh = cv2.threshold(img, 50, 255, cv2.THRESH_BINARY_INV)
-    return img_thresh
+    for question, column in section_data:
+        if isinstance(column, str):
+            # If column is a string (e.g., 'Set'), ensure we don't attempt to operate on it
+            continue
+        processed_data.append((question, int(column)))  # Ensure column is an integer
 
-def find_contours(img_thresh):
-    """Finds contours in the thresholded image."""
-    contours, _ = cv2.findContours(img_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    return contours
+    return processed_data
 
-def get_column_boundaries(image_width, columns):
-    """Calculates column boundaries dynamically based on JSON configuration."""
-    boundaries = []
-    start_x = 0
-    
-    for col in columns:
-        col_width = col["col_width"] * image_width
-        boundaries.append((start_x, start_x + col_width))
-        start_x += col_width + (col["gap_after"] * image_width)
-    
-    return boundaries
+def format_section_output(section_name, processed_data, expected_values):
+    """Format the section output as a string, filling missing values with 'X'."""
+    output = ['X'] * len(expected_values)  # Initialize all as 'X'
 
-def determine_column(cX, col_boundaries):
-    """Determines which column a given x-coordinate belongs to."""
-    for col_idx, (start, end) in enumerate(col_boundaries):
-        if start <= cX < end:
-            return col_idx
-    return None
+    for question, column in processed_data:
+        column_index = int(column) - 1  # Ensure column is an integer and adjust to 0-based index
+        if column_index < len(output):
+            output[column_index] = str(question)
 
-def analyze_omr(image_path, config_path="omr_config.json", top_spacing_percentage=0.0, min_contour_area=200, max_multiple_marks=1):
-    """Analyzes the OMR sheet using dynamic configurations and handles multi-marked answers."""
-    try:
-        config = load_config(config_path)  # Load the OMR layout config
-        img_thresh = load_and_preprocess_image(image_path)
-        contours = find_contours(img_thresh)
-
-        selected_answers = {}
-        options = ['A', 'B', 'C', 'D'][:config["num_options"]]  # Adjust number of options dynamically
-
-        image_height, image_width = img_thresh.shape
-        questions_per_column = config["questions_per_column"]
-        row_height = (image_height * (1 - top_spacing_percentage)) / questions_per_column
-
-        col_boundaries = get_column_boundaries(image_width, config["columns"])
-
-        # Dictionary to track the number of marked bubbles per question
-        question_bubbles = {i: [] for i in range(1, (len(config["columns"]) * questions_per_column) + 1)}
-
-        for contour in contours:
-            if cv2.contourArea(contour) < min_contour_area:
-                continue
-
-            M = cv2.moments(contour)
-            if M["m00"] == 0:
-                continue
-
-            cX = int(M["m10"] / M["m00"])
-            cY = int(M["m01"] / M["m00"])
-
-            row = int((cY - (image_height * top_spacing_percentage)) / row_height) + 1
-            if row < 1 or row > questions_per_column:
-                continue
-
-            col_idx = determine_column(cX, col_boundaries)
-            if col_idx is None:
-                continue
-
-            question_num = col_idx * questions_per_column + row
-            col_start, col_end = col_boundaries[col_idx]
-            col_width = col_end - col_start
-            segment_width = col_width / (config["num_options"] + 1)
-            relative_x = cX - col_start
-            option_index = int(relative_x / segment_width) - 1
-
-            # Add the contour to the relevant question
-            if 0 <= option_index < len(options):
-                question_bubbles[question_num].append(option_index)
-
-        # Now process multi-marked answers
-        for question_num, bubbles in question_bubbles.items():
-            if len(bubbles) > max_multiple_marks:  # Flag or handle multi-marked answers
-                selected_answers[question_num] = "Multiple Marks"
-            elif len(bubbles) == 1:
-                selected_answers[question_num] = options[bubbles[0]]
-            else:
-                selected_answers[question_num] = "Not Marked"
-
-        return selected_answers
-
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        return None
-
-def save_results_to_csv(results, filename="omr_results.csv"):
-    """Saves extracted OMR answers to a CSV file."""
-    with open(filename, mode="w", newline="") as file:
-        writer = csv.writer(file)
-        writer.writerow(["Question", "Selected Answer"])
-        for q_num in sorted(results.keys()):
-            writer.writerow([q_num, results[q_num]])
+    return ''.join(output)
+def subtract_one_from_digits(input_string):
+    """Subtract 1 from each digit in the string, leave 'X' unchanged."""
+    result = []
+    for char in input_string:
+        if char.isdigit():  # If it's a digit, subtract 1
+            result.append(str(int(char) - 1))
+        else:
+            result.append(char)  # If it's 'X', keep it unchanged
+    return ''.join(result)
 
 if __name__ == "__main__":
-    image_path = "image.png"  # Replace with your OMR image
-    selected_answers = analyze_omr(image_path)
+    try:
+        results = scan_omr("omr.jpg", "scanned_omr.png", show=False)
 
-    if selected_answers:
-        print("Selected Answers:")
-        for q_num in sorted(selected_answers.keys()):
-            print(f"Q{q_num}: {selected_answers[q_num]}")
-        
-        save_results_to_csv(selected_answers)
-    else:
-        print("Could not analyze OMR sheet.")
+        # For Roll Number, Registration, and Subject Code, sort by the column (second element)
+        expected_roll = list(range(1, 7))  # 6 columns for Roll Number
+        expected_reg  = list(range(1, 7))  # 6 columns for Registration
+        expected_subj = list(range(1, 4))  # 3 columns for Subject Code
+
+        # Process missing values in each section
+        processed_roll = process_missing_section(results, "Roll Number", expected_roll)
+        processed_reg  = process_missing_section(results, "Registration", expected_reg)
+        processed_subj = process_missing_section(results, "Subject Code", expected_subj)
+
+        # Format and print Roll Number, Registration, and Subject Code as strings
+        roll_str = format_section_output('Roll Number', processed_roll, expected_roll)
+        reg_str = format_section_output('Registration', processed_reg, expected_reg)
+        subj_str = format_section_output('Subject Code', processed_subj, expected_subj)
+
+        # Apply the subtraction for each result string
+        roll_str_adjusted = subtract_one_from_digits(roll_str)
+        reg_str_adjusted = subtract_one_from_digits(reg_str)
+        subj_str_adjusted = subtract_one_from_digits(subj_str)
+
+        print(f"Roll Number: {roll_str_adjusted}")
+        print(f"Registration: {reg_str_adjusted}")
+        print(f"Subject Code: {subj_str_adjusted}")
+
+    except Exception as e:
+        print(f"Error: {e}")
