@@ -1,5 +1,6 @@
 import cv2
 
+
 def calculate_box_positions(image_width, image_height):
     """Calculate box positions for different sections of the OMR sheet."""
     sections = [
@@ -19,18 +20,26 @@ def calculate_box_positions(image_width, image_height):
 
         for col in range(len(cols)):
             for row in range(rows):
-                boxes.append((
-                    int(x1 + col * col_width), int(x1 + (col + 1) * col_width),
-                    int(y1 + row * row_height), int(y1 + (row + 1) * row_height)
-                ))
+                boxes.append(
+                    (
+                        int(x1 + col * col_width),
+                        int(x1 + (col + 1) * col_width),
+                        int(y1 + row * row_height),
+                        int(y1 + (row + 1) * row_height),
+                    )
+                )
     return boxes
+
 
 def draw_rectangles(image):
     """Draw thick blue rectangles around all detected sections."""
     h, w = image.shape[:2]
     for x1, x2, y1, y2 in calculate_box_positions(w, h):
-        cv2.rectangle(image, (x1, y1), (x2, y2), (255, 0, 0), 4)  # Blue color, thickness = 4
+        cv2.rectangle(
+            image, (x1, y1), (x2, y2), (255, 0, 0), 4
+        )  # Blue color, thickness = 4
     return image
+
 
 def overlay_rectangles(image_path, output_path="overlay.jpg", show=False):
     """Load an image, overlay rectangles, and save/display the result."""
@@ -45,6 +54,7 @@ def overlay_rectangles(image_path, output_path="overlay.jpg", show=False):
         cv2.imshow("OMR Sheet", img)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     overlay_rectangles("image.jpg", "overlay_image.png", show=False)

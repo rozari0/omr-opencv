@@ -1,0 +1,26 @@
+# Python
+*.pyc
+__pycache__/
+
+# Environments
+.env
+.venv
+
+# Media
+/media
+
+# Static files
+/static
+
+# VS Code
+.vscode/
+
+# PyCharm
+.idea/
+.ruff_cache/
+
+# Images
+*.png
+*.jpg
+*.jpeg
+uploaded/
